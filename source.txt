@@ -12,14 +12,11 @@ The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "S
 
 #1 Principles
 
-- vertically composable
-- horizonally composable
-- (almost) no buffering
-- no scheduling
 - no udefined state (fail-fast)
   - socket options: what happens if set in the middle of socket's lifetime?
   - errors: what state is the socket left in when function X returns error Y?
   - undefined state is a huge attack surface
+  - seems to violate Postel's principle, but not really -- the implementation can still be liberal, but it must be consciously liberal (i.e. implementer is explicit about what they allow)
 - kernel/user space agnostic 
   - deploying in kernel space can take years
   - unikernels and such
@@ -90,6 +87,24 @@ While this is a very visible case of horizontal composition of protocols the tec
 +-----------------------------------+
 %
 
+The requirement for horizontal protocol composability has important consequences for the API design.
+
+When designing a protocol, it's common to ignore the protocol termination semantics and just default to something like "just close the underlying TCP connection". However, if we want to be able to start a new protocol on top of the underlying protocol, that's no longer an option. We have to terminate the old protocol without destroying the entire protocol stack. Moreover, we want the termination to proceed in orderly manner, so that after it is done, both peers can agree where exactly, in the stream of bytes they are. Otherwise, there's no way to start the new protocol.
+
+Thus, further in this document, there will be a lot of discussion about orderly termination of protocols.
+
+#2 Scheduling
+
+During the decades since BSD sockets were first introduced the way they are used have changed significantly. While in the beginning the user was supposed to fork a new process for each connection and do all the work using simple blocking calls nowadays they are expected to keep a pool of connections, check them via functions like "poll" or "kqueue" and dispatch any work to be done to one of the worker threads in a thread pool. In other words, user is supposed to do network scheduling by hand.
+
+This changes happened for performance reasons and haven't improved functionality or usability of BSD socket API in any way. On the contrary, by requiring every programmer to do system programmer's work it contributed to proliferation of buggy, hard-to-debug and barely maintainable network code.
+
+To address this problem, this memo assumes that there already exists an efficient concurrency implementation. It assumes that forking a new lightweight process takes at most hundreds of nanoseconds and context switch takes at worst tens of nanoseconds. Note that there are already such concurrency systems deployed in the wild. One well-known example are Golang's goroutines but there are others available as well.
+
+In such environment network programming can be done in the old "one process per connection" way, with all the functions exhibiting blocking behavior. There's no need for polling, thread pools, callbacks, explicit state machines or similar antics.
+
+This memo thus adheres to "let system programmers do system programming" maxim and doesn't address the problem of scheduling at all.
+
 #1 Handles
 
 Handle is an integer referring to a protocol instance, very much like "socket" or "file descriptor" in POSIX world.
@@ -98,13 +113,13 @@ However, given that we want the API to be kernel/user space agnostic, we are goi
 
 But despite the difference in terminology, handles are still integers and they can therefore be, if implemented in the kernel space, just a special type of file descriptor.
 
-In user space the situation is somehow different. POSIX provides no way to create custom sockets or file descriptors. Therefore, user-space implementations of this specification has to make handles a different kind of entity. For example, file descriptor 3 may refer to a file opened using POSIX API. Handle 3 may refer to a TCP connection open using API defined in this document.
+In user space the situation is somewhat different. POSIX provides no way to create custom sockets or file descriptors. Therefore, user-space implementations of this specification has to make handles a different kind of entity. For example, file descriptor 3 may refer to a file opened using POSIX API. Handle 3 may refer to a TCP connection open using API defined in this document.
 
-The user MUST NOT assume that POSIX file descriptors and handles live in the same namespace.
+The user MUST NOT assume that POSIX file descriptors and handles live in the same namespace and/or never clash each with the other.
 
-Handles MUST NOT be negative. Zero is a valid value though. This is in line with the semantics of POSIX file descriptor. Value of -1 is typically used to signal a function failure. 
+Handles MUST NOT be negative. They MAY be zero. This is in line with the semantics of POSIX file descriptor. Value of -1 is typically used to signal a function failure. 
 
-Handles can be closed using "hclose" function.
+Handles can be closed using "hclose" function:
 
 %
 int hclose(int h);
@@ -112,9 +127,9 @@ int hclose(int h);
 
 This function is very similar to POSIX "close" function and in fact, in kernel-space implementations of this specification, it may map directly to the POSIX "close" function.
 
-That being said, there's a slight difference in semantics: "hclose" MUST never block or leave any processing to be finished in the background. It MUST close the protocol and deallocate all the associated resources immediately.
+That being said, there's a difference in semantics when compared to BSD sockets: "hclose" MUST never block or leave any processing to be finished in the background. It MUST close the protocol and deallocate all the associated resources immediately. (This behaviour is compliant with the POSIX specification of "close" function.)
 
-Note that this means that "hclose" doesn't guarantee orderly shutdown of the protocol. If communication with the peer is impossible, it can even omit sending RST packet. This, in turn, is not a good news for the peer which may be left with a dangling connection. That being the case user SHOULD use "hclose" function sparingly. It may be appropriate, for example, in a case of DoS attack, or when the peer violates the network protocol specification. To perform an orderly shutdown, individual protocols SHOULD provide dedicated functions.
+Note that this means that "hclose" doesn't guarantee orderly shutdown of the protocol. If communication with the peer is impossible, it can even omit sending RST packet (or equivalent). This, in turn, is not a good news for the peer which may be left with a dangling connection. That being the case the user SHOULD use "hclose" function sparingly. It may be appropriate, for example, in a case of a DoS attack, or when the peer violates the protocol specification. To perform an orderly shutdown, individual protocols SHOULD provide dedicated functions.
 
 Handles cannot be duplicated. Even if implemented as file descriptors, POSIX "dup" function MUST return with ENOTSUP error.
 
@@ -137,7 +152,7 @@ h = hown(h);
 
 Note that, unlike with duplicated file descriptors, transfer of ownership will render all the copies of the original handle invalid.
 
-The semantics of ownership transfer, as described above, is needed to ensure encapsulation of vertically stacked protocols: If protocol B lives on top of protocol A, it can transfer the ownership of A to iself, thus making it impossible for the original owner of A to interfere with B's usage of A.
+The semantics of ownership transfer, as described above, are needed to ensure encapsulation of vertically stacked protocols: If protocol B lives on top of protocol A, it can transfer the ownership of A to iself, thus making it impossible for the original owner of A to interfere with B's usage of A.
 
 TODO: Handle refers to a protocol stack, not a protocol. Should this be explained here or elsewhere?
 
@@ -216,7 +231,8 @@ It is used for the same purpose that structure iovec is used for in POSIX. Howev
 I/O lists are passed to the API using two arguments: Pointer to the first element of the list and pointer to the last element of the list. For example:
 
 %
-int msendl(int s, struct iolist *first, struct iolist *last, int64_t deadline);
+int msendl(int s, struct iolist *first, struct iolist *last,
+           int64_t deadline);
 %
 
 I/O lists are not thread-safe. Functions accepting them as input are allowed to modify them (not the contents of the message though!) but they MUST restore the list into its original state before returning to the caller. The list MUST be restored to its original state even if the function fails.
@@ -234,6 +250,34 @@ TODO: Show some use cases:
 - prefix message
 - add to message
 - replace N bytes
+
+#2 Tx buffering
+
+Buffering of outbound data and sending them down the stack in batches often results in improved performance. This specification allows the protocol implementation to do so as long as data is flushed when the particular protocol layer is terminated. However, if done, the data should also be flushed periodically not to induce unbounded latencies when there is not enough new data to fill in the tx buffer. This may, in turn, introduce unwanted complexity to the protocol implementation. It is often preferrable to avoid tx buffering and assume that it will be done somewhere deeper in the stack anyway. 
+
+#2 Rx buffering
+
+Buffering of inbound data collides with vertical composability of protocols.
+
+Consider the following protocol stack:
+
+%
++---+
+| C |
++---+
+| B |
++---+
+| A |
++---+
+%
+
+Imagine that B reads 1000 bytes of data from A and puts it into its rx buffer. Further, imagine that C asks B for 500 bytes, leaving remaining 500 bytes in B's rx buffer and asks B to close. What is B going to do with those 500 bytes? There's no way to push them back to A. Allowing for such an operation would mean that A's rx buffer would have to be virtually unbounded.
+
+If, on the other hand, the remaining bytes were dropped there would be no way to start a new protocol on top of the same underlyingsocket. The new protocol would miss initial 500 bytes of data.
+
+Luckily though, the above reasoning doesn't apply to the bottommost protocol in the stack. If user closes a bottommost protocol they can't create a new protocol on top of the underlying layer simply because there's no underlying layer. In that case any data remaining in the tx buffer can be dropped.
+
+Also, rx buffering on the lowermost level, where the protocol is interfacing with the hardware or, alternatively, with user/kernel space boundary, is likely to provide the largest performance benefit.  Absence of rx buffering on higher levels, where performance impact of additional receive operation is basically that of a function call, is not likely to incur huge performance penalty. And even more so given that higher layers of the stack are likely to be message-based and thus some amount of batching, proportional to the average message size, happens anyway.
 
 #1 Caveats
 
@@ -257,4 +301,4 @@ This memo includes no request to IANA.
 
 - small attack surface
 - reusability means that bugs can be fixed in many protocol stacks simultaneously
-
+- Network APIs can facilitate DoS attacks by allowing for unlimited buffer sizes and for infinite deadlines. This proposal avoids the first issue by requiring the user to allocate all the buffers. It addresses the second problem by always making the deadline explicit. Also, by not requiring recomputation of timeout intervals it makes the deadlines easy to use and hard to get wrong. The user should take advantage of that and set reasonable timeout for every network operation.
