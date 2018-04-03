@@ -2,9 +2,10 @@
 #1 Introduction
 
 - ease of development
-- some WG have dropped the "running code" principle (see "DNS Camel" talk)
+- some WGs have dropped the "running code" principle (see "DNS Camel" talk)
 - composability = reuse
 - minimize attack surface
+- rapid prototyping
 
 #1 Terminology
 
@@ -271,7 +272,7 @@ Consider the following protocol stack:
 +---+
 %
 
-Imagine that B reads 1000 bytes of data from A and puts it into its rx buffer. Further, imagine that C asks B for 500 bytes, leaving remaining 500 bytes in B's rx buffer and asks B to close. What is B going to do with those 500 bytes? There's no way to push them back to A. Allowing for such an operation would mean that A's rx buffer would have to be virtually unbounded.
+Imagine that B reads 1000 bytes of data from A and puts it into its rx buffer. Further, imagine that C asks B for 500 bytes, leaving remaining 500 bytes in B's rx buffer. Then it asks B to close. What is B going to do with those 500 bytes in its buffer? There's no way to push them back to A. Allowing for such an operation would mean that A's rx buffer would have to be virtually unbounded.
 
 If, on the other hand, the remaining bytes were dropped there would be no way to start a new protocol on top of the same underlyingsocket. The new protocol would miss initial 500 bytes of data.
 
