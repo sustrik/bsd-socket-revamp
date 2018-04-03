@@ -1,11 +1,247 @@
 
 #1 Introduction
 
-Blah. Blah.
+- ease of development
+- some WG have dropped the "running code" principle (see "DNS Camel" talk)
+- composability = reuse
+- minimize attack surface
 
 #1 Terminology
 
 The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED",  "MAY", and "OPTIONAL" in this document are to be interpreted as described in RFC 2119.
+
+#1 Principles
+
+- vertically composable
+- horizonally composable
+- (almost) no buffering
+- no scheduling
+- no udefined state (fail-fast)
+  - socket options: what happens if set in the middle of socket's lifetime?
+  - errors: what state is the socket left in when function X returns error Y?
+  - undefined state is a huge attack surface
+- kernel/user space agnostic 
+  - deploying in kernel space can take years
+  - unikernels and such
+  - artificial split between core protocols and application protocols
+  - also, it's slower
+  - also, being in the user space it has less privileges
+- the other way round: sanitize the API to steer protocol implementers towards sane protocol design
+  - good practices should be easy to implement
+  - bad practices should be hard to implement
+- encapsulation
+  - without composability, all layers will end up intertwined
+  - it's easier to reason about nicely encapsulated microprotocol
+- two kinds of users
+  - protocol above
+  - application or "orchestrator"
+- parametrizable protocols
+  - example of size-prefixed messages
+  - show how this can be used to avoid extra initial roundtrips
+- different kinds of protocols
+  - application vs. transport
+    - application has create/destroy APIs, but no send/recv APIs
+    - transport has both
+    - transport can be either bytestream or message-oriented
+  - presentation layer is not addressed, up to the user to decide whether to model it as application or transport
+  - protocols with init/term vs. without it
+
+#2 Vertical composability
+
+Vertical composability is an ability to stack protocols one on the top of another. The protocol on the top exists within the payload of the protocol beneath it.
+
+Example of vertical stack of protocols:
+
+%
++----------+
+|   HTTP   |
++----------+
+|    TCP   |
++----------+
+|    IP    |
++----------+
+| Ethernet |
++----------+
+%
+
+#2  Horizontal composability
+
+Horizontal composability is an ability to execute protocols in sequential manner. When two protocols are composed in this manner one type of communication ends to be replaced by another type of communication. In other words, one protocol is terminated and another one is started, reusing the same underlying protocol.
+
+An example of horizontal composability is how WebSocket begins with HTTP handshake which is, in turn, followed by core WebSocket protocol:
+
+%
++----------------------------------+
+|   HTTP   |       WebSocket       |
++----------+-----------------------+
+|                TCP               |
++----------------------------------+
+%
+
+Note how this pattern makes protocols reusable: The same HTTP handshake can be used for both trasferring simple HTML web page and for initiating a WebSocket session. Also, it could be used in the future as a component of new, yet unforeseen protocols.
+
+While this is a very visible case of horizontal composition of protocols the technique is in fact ubiquitous. For example, most protocols are composed from three distinct mini-protocols: protocol header (initial handshake), protocol body (sending data back and forth) and protocol footer (terminal handshake):
+
+%
++-----------------------------------+
+| Header |       Body      | Footer |
++--------+-----------------+--------+
+|                TCP                |
++-----------------------------------+
+%
+
+#1 Handles
+
+Handle is an integer referring to a protocol instance, very much like "socket" or "file descriptor" in POSIX world.
+
+However, given that we want the API to be kernel/user space agnostic, we are going to use a different term.
+
+But despite the difference in terminology, handles are still integers and they can therefore be, if implemented in the kernel space, just a special type of file descriptor.
+
+In user space the situation is somehow different. POSIX provides no way to create custom sockets or file descriptors. Therefore, user-space implementations of this specification has to make handles a different kind of entity. For example, file descriptor 3 may refer to a file opened using POSIX API. Handle 3 may refer to a TCP connection open using API defined in this document.
+
+The user MUST NOT assume that POSIX file descriptors and handles live in the same namespace.
+
+Handles MUST NOT be negative. Zero is a valid value though. This is in line with the semantics of POSIX file descriptor. Value of -1 is typically used to signal a function failure. 
+
+Handles can be closed using "hclose" function.
+
+%
+int hclose(int h);
+%
+
+This function is very similar to POSIX "close" function and in fact, in kernel-space implementations of this specification, it may map directly to the POSIX "close" function.
+
+That being said, there's a slight difference in semantics: "hclose" MUST never block or leave any processing to be finished in the background. It MUST close the protocol and deallocate all the associated resources immediately.
+
+Note that this means that "hclose" doesn't guarantee orderly shutdown of the protocol. If communication with the peer is impossible, it can even omit sending RST packet. This, in turn, is not a good news for the peer which may be left with a dangling connection. That being the case user SHOULD use "hclose" function sparingly. It may be appropriate, for example, in a case of DoS attack, or when the peer violates the network protocol specification. To perform an orderly shutdown, individual protocols SHOULD provide dedicated functions.
+
+Handles cannot be duplicated. Even if implemented as file descriptors, POSIX "dup" function MUST return with ENOTSUP error.
+
+On the other hand, handles support a simple mechanism for transferring ownership.
+
+The idea is that the owner is whoever is aware of the numeric value of the handle. To transfer ownership, the handle is assigned a different number using "hown" function:
+
+%
+int hown(int h);
+%
+
+For example:
+
+%
+int h = tcp_connect(addr, -1);
+/* h = 58 */
+h = hown(h);
+/* h = 12 */
+%
+
+Note that, unlike with duplicated file descriptors, transfer of ownership will render all the copies of the original handle invalid.
+
+The semantics of ownership transfer, as described above, is needed to ensure encapsulation of vertically stacked protocols: If protocol B lives on top of protocol A, it can transfer the ownership of A to iself, thus making it impossible for the original owner of A to interfere with B's usage of A.
+
+TODO: Handle refers to a protocol stack, not a protocol. Should this be explained here or elsewhere?
+
+#1 Deadlines
+
+Unlike with BSD sockets the deadlines are points in time rather than intervals. This allows to use the same deadline in multiple calls without need to recompute the timeout interval.
+
+Consider the following pseudocode using the classic interval-based timeouts:
+
+%
+int timeout = 1000;
+time t1 = now();
+send(s, "ABC", 3, timeout);
+time t2 = now();
+timeout -= (t2 - t1)
+if(timeout < 0) return;
+send(s, "DEF", 3, timeout);
+%
+
+It can be rewritten in a much simpler way using point-in-time-based deadlines:
+
+%
+time deadline = now() + 1000;
+send(h, "ABC", 3, deadline);
+send(h, "DEF", 3, deadline);
+%
+
+Function "now" MUST be available.
+
+%
+int64_t now(void);
+%
+
+It MUST return current time in millisecond precision in a form of 64-bit signed integer. The returned time MUST be a positive number.
+
+The time MUST be monotonic, i.e. it MUST NOT ever move backwards.
+
+The user MUST NOT assume that the epoch (time 1) begins at any particular point in time. It may be an UNIX epoch (Jan 1st, 1970). It may also be the time when the computer was booted. This specification gives no guarantees.
+
+All functions that could possibly block MUST accept a deadline. The deadline is a time, as defined above.
+
+There are two special values that can be passed to any function requiring a deadline: Zero means that the function should not block. If the operation cannot be accomplished immediately, it MUST time out. -1 means infinite deadline. The function MUST never time out. It can only exit if the operation succeeded or a non-timeout-related error was encountered.
+
+The deadline SHOULD be passed to the function as its last argument. If deadline expires the function should return with ETIMEDOUT error.
+
+Example:
+
+%
+int rc = foo(now() + 1000);
+if(rc == -1 && errno == ETIMEDOUT) {
+    printf("Function foo has not succeeded within 1 second.\n");
+    return 1;
+}
+%
+
+#1 I/O lists
+
+Send and receive functions are using iolist structure with the following definition:
+
+%
+struct iolist {
+    void *iol_base;
+    size_t iol_len;
+    struct iolist *iol_next;
+    int iol_rsvd;
+};
+%
+
+It is used for the same purpose that structure iovec is used for in POSIX. However, instead of being assembled in gather/scatter arrays, iolist structures are chained to form singly-linked lists.
+
+* iol_base points to a buffer. For receiving functions it can be NULL, meaning that iol_len number of bytes should be skipped.
+* iol_len is the size of the buffer pointed to by iol_base
+* iol_next is the next element in the linked list, last element in the list MUST have this fields set to NULL
+* iol_rsvd is reserved and MUST be always set to zero by the caller
+
+I/O lists are passed to the API using two arguments: Pointer to the first element of the list and pointer to the last element of the list. For example:
+
+%
+int msendl(int s, struct iolist *first, struct iolist *last, int64_t deadline);
+%
+
+I/O lists are not thread-safe. Functions accepting them as input are allowed to modify them (not the contents of the message though!) but they MUST restore the list into its original state before returning to the caller. The list MUST be restored to its original state even if the function fails.
+
+Function accepting an I/O list as a parameter, unless it just forwards the list to a different function or protocol, MUST check validity of the list. The list is invalid iff:
+
+* last->iol_next is not NULL
+* first and last don't belong to the same list
+* there's a loop in the list
+* iol_rsvd of any item is non-zero
+* for sending functions, if iol_base of any element with non-zero length is NULL
+
+TODO: Show some use cases:
+
+- prefix message
+- add to message
+- replace N bytes
+
+#1 Caveats
+
+- this specification prevents some scenarios
+  - specifically, you can't use lower protocol's termination mechanism and still be able to do the "half-close connection, then read the remaining messages" scenario.
+- this is probably a good thing
+- if needed, because a legacy protocol uses it, it can still be served by this API by wrapping all the protocol layers into a single macro-protocol.
+- actually, this technique let's you get away with almost anything 
 
 #1 IANA Considerations
 
@@ -13,4 +249,6 @@ This memo includes no request to IANA.
 
 #1 Security Considerations
 
-Blah. Blah.
+- small attack surface
+- reusability means that bugs can be fixed in many protocol stacks simultaneously
+

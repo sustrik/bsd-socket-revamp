@@ -77,13 +77,26 @@ for(var i = 0; i < lns.length; i++) {
             t += '</section>\n'     
         }
         else {
-            for(var j = 0; j != level - lvl; j++) {
+            for(var j = 0; j != level - lvl + 1; j++) {
                 t += '</section>\n'
             }
         }
         t += '<section title="' + ln.substring(3) + '">\n'
         level = lvl
         continue
+    }
+    if(ln === "%") {
+       t += '<figure>\n'
+       t += '<artwork>\n'
+       while(true) {
+           i++
+           ln = lns[i]
+           if(ln === "%") break
+           t += escape(ln) + "\n"
+       }
+       t += '</artwork>\n'
+       t += '</figure>\n'
+       continue
     }
     t += "<t>" + escape(ln) + "</t>\n"
 }
