@@ -241,7 +241,13 @@ TODO: Show some use cases:
   - specifically, you can't use lower protocol's termination mechanism and still be able to do the "half-close connection, then read the remaining messages" scenario.
 - this is probably a good thing
 - if needed, because a legacy protocol uses it, it can still be served by this API by wrapping all the protocol layers into a single macro-protocol.
-- actually, this technique let's you get away with almost anything 
+- actually, this technique let's you get away with almost anything
+- what about STARTTLS?
+  - works OK if the layers above can be torn down after STARTTLS
+    - this means any state is lost
+    - however, SMTP starts the entire negotiation again, so that's not a problem
+  - if you can't tear down the layers above, it's a problem
+    - does anyone actually do this kind of insane "layer injection" into a living stack?
 
 #1 IANA Considerations
 
