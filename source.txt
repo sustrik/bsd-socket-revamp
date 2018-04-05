@@ -17,7 +17,7 @@ The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "S
   - socket options: what happens if set in the middle of socket's lifetime?
   - errors: what state is the socket left in when function X returns error Y?
   - undefined state is a huge attack surface
-  - seems to violate Postel's principle, but not really -- the implementation can still be liberal, but it must be consciously liberal (i.e. implementer is explicit about what they allow)
+  - seems to violate Postel's principle, but not really -- the implementation can still be liberal, but it must be consciously liberal (i.e. implementer is explicit about stuff that is allowed)
 - kernel/user space agnostic 
   - deploying in kernel space can take years
   - unikernels and such
@@ -90,9 +90,9 @@ While this is a very visible case of horizontal composition of protocols the tec
 
 The requirement for horizontal protocol composability has important consequences for the API design.
 
-When designing a protocol, it's common to ignore the protocol termination semantics and just default to something like "just close the underlying TCP connection". However, if we want to be able to start a new protocol on top of the underlying protocol, that's no longer an option. We have to terminate the old protocol without destroying the entire protocol stack. Moreover, we want the termination to proceed in orderly manner, so that after it is done, both peers can agree where exactly, in the stream of bytes they are. Otherwise, there's no way to start the new protocol.
+When designing a network protocol, it's common to ignore the protocol termination semantics and just default to something like "just close the underlying TCP connection". However, if we want to be able to start a new protocol on top of the underlying protocol, that's no longer an option. We have to terminate the old protocol without destroying the entire protocol stack. Moreover, we want the termination to proceed in orderly manner, so that after it is done, both peers can agree where exactly, in the stream of bytes they are. If they can't, there's no way to start the new protocol.
 
-Thus, further in this document, there will be a lot of discussion about orderly termination of protocols.
+Thus, further on in this document, there will be a lot of discussion about orderly termination of protocols.
 
 #2 Scheduling
 
@@ -252,11 +252,38 @@ TODO: Show some use cases:
 - add to message
 - replace N bytes
 
-#2 Tx buffering
+TODO: Skipping. The goal of the skipping design is not to require user to allocate memory if they want to skip even large amount od data. This is often needed when implementing terminal handshake: One party sends a termination command, then skips all the incoming data until it gets confirmation of the command.
+
+I/O list element with lol_base set to NULL can be used to skip messages.
+
+To skip arbitrarily large message:
+
+%
+sz = mrecv(s, NULL, SIZE_MAX, -1);
+%
+
+To read first eight bytes of a message, then skip the rest of it:
+
+%
+char buf[8];
+struct iolist iol2 = {NULL, SIZE_MAX, NULL, 0};
+struct iolist iol1 = {buf, sizeof(buf), &iol2, 0};
+sz = mrecvl(s, iol1, iol2, -1);
+%
+
+To skip bytes in bytestream protocol, it works in a similar way:
+
+%
+rc = brecv(s, NULL, 8, -1);
+%
+
+TODO: How to skip until end of bytestream?
+
+#1 Tx buffering
 
 Buffering of outbound data and sending them down the stack in batches often results in improved performance. This specification allows the protocol implementation to do so as long as data is flushed when the particular protocol layer is terminated. However, if done, the data should also be flushed periodically not to induce unbounded latencies when there is not enough new data to fill in the tx buffer. This may, in turn, introduce unwanted complexity to the protocol implementation. It is often preferrable to avoid tx buffering and assume that it will be done somewhere deeper in the stack anyway. 
 
-#2 Rx buffering
+#1 Rx buffering
 
 Buffering of inbound data collides with vertical composability of protocols.
 
