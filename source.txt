@@ -64,7 +64,7 @@ Example of vertical stack of protocols:
 
 #2  Horizontal composability
 
-Horizontal composability is an ability to execute protocols in sequential manner. When two protocols are composed in this manner one type of communication ends to be replaced by another type of communication. In other words, one protocol is terminated and another one is started, reusing the same underlying protocol.
+Horizontal composability is an ability to execute protocols in sequential manner. When two protocols are composed in this manner one type of communication ends to be replaced by another type of communication. In other words, one protocol is terminated and another one is started on the top of the same underlying protocol.
 
 An example of horizontal composability is how WebSocket begins with HTTP handshake which is, in turn, followed by core WebSocket protocol:
 
@@ -76,7 +76,7 @@ An example of horizontal composability is how WebSocket begins with HTTP handsha
 +----------------------------------+
 %
 
-Note how this pattern makes protocols reusable: The same HTTP handshake can be used for both trasferring simple HTML web page and for initiating a WebSocket session. Also, it could be used in the future as a component of new, yet unforeseen protocols.
+Note how this pattern makes protocols reusable: The same HTTP handshake can be used for both trasferring simple HTML web page and for initiating a WebSocket session. Also, either part could be used in the future as a component of new, yet unforeseen protocols.
 
 While this is a very visible case of horizontal composition of protocols the technique is in fact ubiquitous. For example, most protocols are composed from three distinct mini-protocols: protocol header (initial handshake), protocol body (sending data back and forth) and protocol footer (terminal handshake):
 
@@ -94,15 +94,19 @@ When designing a network protocol, it's common to ignore the protocol terminatio
 
 Thus, further on in this document, there will be a lot of discussion about orderly termination of protocols.
 
+#2 The nature of protocol
+
+When thinking of network protocols we tend to think of some kind of self-contained entity. ...
+
 #2 Scheduling
 
-During the decades since BSD sockets were first introduced the way they are used have changed significantly. While in the beginning the user was supposed to fork a new process for each connection and do all the work using simple blocking calls nowadays they are expected to keep a pool of connections, check them via functions like "poll" or "kqueue" and dispatch any work to be done to one of the worker threads in a thread pool. In other words, user is supposed to do network scheduling by hand.
+During the decades since BSD sockets were first introduced the way they are used have changed significantly. While in the beginning the user was supposed to fork a new process for each connection and do all the work using simple blocking calls nowadays they are expected to keep a pool of connections, check them via functions like "poll" or "kqueue" and dispatch any work to be done to one of the worker threads in a thread pool. In other words, user is supposed to do scheduling by hand.
 
 This changes happened for performance reasons and haven't improved functionality or usability of BSD socket API in any way. On the contrary, by requiring every programmer to do system programmer's work it contributed to proliferation of buggy, hard-to-debug and barely maintainable network code.
 
 To address this problem, this memo assumes that there already exists an efficient concurrency implementation. It assumes that forking a new lightweight process takes at most hundreds of nanoseconds and context switch takes at worst tens of nanoseconds. Note that there are already such concurrency systems deployed in the wild. One well-known example are Golang's goroutines but there are others available as well.
 
-In such environment network programming can be done in the old "one process per connection" way, with all the functions exhibiting blocking behavior. There's no need for polling, thread pools, callbacks, explicit state machines or similar antics.
+In the environment with cheap concurrency the network programming can be done in the old "one process per connection" way, with all the functions exhibiting blocking behavior. There's no need for polling, thread pools, callbacks, explicit state machines or similar antics.
 
 This memo thus adheres to "let system programmers do system programming" maxim and doesn't address the problem of scheduling at all.
 
@@ -114,11 +118,11 @@ However, given that we want the API to be kernel/user space agnostic, we are goi
 
 But despite the difference in terminology, handles are still integers and they can therefore be, if implemented in the kernel space, just a special type of file descriptor.
 
-In user space the situation is somewhat different. POSIX provides no way to create custom sockets or file descriptors. Therefore, user-space implementations of this specification has to make handles a different kind of entity. For example, file descriptor 3 may refer to a file opened using POSIX API. Handle 3 may refer to a TCP connection open using API defined in this document.
+In user space the situation is somewhat different. POSIX provides no way to create custom sockets or file descriptors. Therefore, user-space implementations of this specification has to make handles a different kind of entity. For example, file descriptor 3 may refer to a file opened using POSIX API. Handle 3 may refer to a TCP connection opened using API defined in this document.
 
 The user MUST NOT assume that POSIX file descriptors and handles live in the same namespace and/or never clash each with the other.
 
-Handles MUST NOT be negative. They MAY be zero. This is in line with the semantics of POSIX file descriptor. Value of -1 is typically used to signal a function failure. 
+Handles MUST NOT be negative. They MAY be zero. This is in line with the semantics of POSIX file descriptors. Value of -1 is typically used to signal a function failure. 
 
 Handles can be closed using "hclose" function:
 
@@ -128,15 +132,15 @@ int hclose(int h);
 
 This function is very similar to POSIX "close" function and in fact, in kernel-space implementations of this specification, it may map directly to the POSIX "close" function.
 
-That being said, there's a difference in semantics when compared to BSD sockets: "hclose" MUST never block or leave any processing to be finished in the background. It MUST close the protocol and deallocate all the associated resources immediately. (This behaviour is compliant with the POSIX specification of "close" function.)
+That being said, there's a difference in semantics when compared to BSD sockets: "hclose" MUST never block or leave any processing to be finished in the background. It MUST close the protocol and deallocate all the associated resources immediately. (But note that this behaviour doesn't contradict the POSIX specification of "close" function.)
 
 Note that this means that "hclose" doesn't guarantee orderly shutdown of the protocol. If communication with the peer is impossible, it can even omit sending RST packet (or equivalent). This, in turn, is not a good news for the peer which may be left with a dangling connection. That being the case the user SHOULD use "hclose" function sparingly. It may be appropriate, for example, in a case of a DoS attack, or when the peer violates the protocol specification. To perform an orderly shutdown, individual protocols SHOULD provide dedicated functions.
 
-Handles cannot be duplicated. Even if implemented as file descriptors, POSIX "dup" function MUST return with ENOTSUP error.
+Handles cannot be duplicated. Even if implemented as file descriptors, POSIX "dup" function MUST return -1 and set errno to ENOTSUP.
 
 On the other hand, handles support a simple mechanism for transferring ownership.
 
-The idea is that the owner is whoever is aware of the numeric value of the handle. To transfer ownership, the handle is assigned a different number using "hown" function:
+The idea is that the owner is whoever knows the numeric value of the handle. To transfer ownership, the handle is assigned a different number using "hown" function:
 
 %
 int hown(int h);
@@ -195,7 +199,7 @@ The user MUST NOT assume that the epoch (time 1) begins at any particular point 
 
 All functions that could possibly block MUST accept a deadline. The deadline is a time, as defined above.
 
-There are two special values that can be passed to any function requiring a deadline: Zero means that the function should not block. If the operation cannot be accomplished immediately, it MUST time out. -1 means infinite deadline. The function MUST never time out. It can only exit if the operation succeeded or a non-timeout-related error was encountered.
+There are two special values that can be passed to any function requiring a deadline: Zero means that the function should not block. If the operation cannot be accomplished immediately, it MUST time out. -1 means no deadline. The function MUST never time out. It can only exit if the operation succeeded or a non-timeout-related error was encountered.
 
 The deadline SHOULD be passed to the function as its last argument. If deadline expires the function should return with ETIMEDOUT error.
 
@@ -252,6 +256,8 @@ TODO: Show some use cases:
 - add to message
 - replace N bytes
 
+#1 Skipping
+
 TODO: Skipping. The goal of the skipping design is not to require user to allocate memory if they want to skip even large amount od data. This is often needed when implementing terminal handshake: One party sends a termination command, then skips all the incoming data until it gets confirmation of the command.
 
 I/O list element with lol_base set to NULL can be used to skip messages.
@@ -277,7 +283,7 @@ To skip bytes in bytestream protocol, it works in a similar way:
 rc = brecv(s, NULL, 8, -1);
 %
 
-TODO: How to skip until end of bytestream?
+TODO: How to skip until end of bytestream? I don't have a single use case for that. Maybe it's not needed.
 
 #1 Tx buffering
 
@@ -314,6 +320,14 @@ Also, rx buffering on the lowermost level, where the protocol is interfacing wit
 - this is probably a good thing
 - if needed, because a legacy protocol uses it, it can still be served by this API by wrapping all the protocol layers into a single macro-protocol.
 - actually, this technique let's you get away with almost anything
+- imagine a specialized send function, e.g. udp_send(s, addr, buf, len)
+  - once the socket is wrapped in a different protocol the address can't be specified
+  - we have to rely on the default
+  - different example of the same: TEXT vs. BINARY messages in WebSocket protocol
+    - is that a bad protocol design?
+  - in theory sometimes can be solved by having multiple sockets
+  - traditional solution: ancillary data
+    - some complex that almost noone uses it
 - what about STARTTLS?
   - works OK if the layers above can be torn down after STARTTLS
     - this means any state is lost
