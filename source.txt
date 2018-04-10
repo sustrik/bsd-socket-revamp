@@ -313,6 +313,31 @@ Luckily though, the above reasoning doesn't apply to the bottommost protocol in 
 
 Also, rx buffering on the lowermost level, where the protocol is interfacing with the hardware or, alternatively, with user/kernel space boundary, is likely to provide the largest performance benefit.  Absence of rx buffering on higher levels, where performance impact of additional receive operation is basically that of a function call, is not likely to incur huge performance penalty. And even more so given that higher layers of the stack are likely to be message-based and thus some amount of batching, proportional to the average message size, happens anyway.
 
+#1 Ancillary data
+
+The problem that ancillary data, as seen in classic BSD socket API, tries to solve is the following: Given a protocol that needs extra information than raw payload data for sending, or, respectively, a protocol that provides more information than message payload when receiving, can such a protocol be accessed using standardized APIs?
+
+In other words, ancillary data provides a generic calling convention for arbitrary functionality. Not surprisingly, it means that user has to do compiler's work by hand. They have to put arguments into the call frame manually, make sure that everyting is properly aligned and so on.
+
+BSD socket API also has "flags" parameter to send/recv functions which can be used as simple kind of ancillary data. Even more ancillary data can be passed to sendto/sendmsg/recvfrom/recvmsg functions.
+
+With vertically composable protocols the problem gets more severe: If there are N layers in the stack, is it possible to send a message and at the same time supply additional information to each layer of the stack?
+
+Use cases:
+
+* WebSockets: Each message can be typed either as text or binary.
+* TCP: OOB data. This is used, if at all, to notify the peer out-of-band that user canceled the communication.
+* UNIX domain sockets: SCM_RIGHTS.
+* SCTP: Channel number, SCTP_UNORDERED, SCTP_ABORT etc.
+* UDP: IP address.
+
+Analysis:
+
+* WebSockets: This is an instance of bad protocol design. Internals of JavaScript client library (treat message as string or bytearray JavaScript type) are leaked into the protocol design. The API proposed in this memo isn't trying to support any kind of misguided protocol design, so we can, for now, ignore this use case.
+* TCP: OOB is barely used at all. That being said, it looks like a protocol-specific functionality that could be accessed by a dedicated TCP-specific function. This means that the functionality won't be accessible if there's a different protocol layered on the top of TCP (because encapsulation). However, if OOB is used to signal cancelation, the layeres on the top of TCP can be dismantled first, and OOB signal can be sent afterwards. Alternatively, OOB message can be thought of as part of the TCP's termination sequence and not handled by send/recv calls. (Similar reasoning applies to SCM_RIGTHS data on UNIX domain sockets.)
+* SCTP has mutliplexing capabilities. SCTP API [RFC] uses ancillary data to indicate which channel should the message be sent on, or which channel the message was received on. The API, by the wat, nicely illustrates the problem with ancillary data: Although the channel number should, in theory, be passed via ancillary data, the designers of the API understood that ancillary data are just too hard for an average user to use and provided a set of dedicated functions that wrap all the messy details in nice C functions with channel number passed in as an explicit parameter. In any case, it looks like this functionality would be better implemented by having a separate handle for each channel.
+* UDP socket has no dedicated peer. It can send messages to or receive messages from an arbitrary peer. It therefore makes sense to specify the destination IP address when sending a packet and to be able to retrieve the sender's IP address when receiving a packet. This is a genuine, mainstream, real-world use case rather than a weird corner case.
+
 #1 Caveats
 
 - this specification prevents some scenarios
